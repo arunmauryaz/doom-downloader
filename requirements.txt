@@ -1,0 +1,6 @@
+yt-dlp>=2026.1.0
+customtkinter>=6.0.0
+pillow>=10.0.0
+requests>=2.31.0
+mutagen>=1.47.0
+darkdetect>=0.8.0

@@ -1,0 +1,29 @@
+# Local environment and state
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+settings.json
+.env
+.env.*
+!.env.example
+*.log
+
+# Generated files and downloads
+/dist/
+/build/
+/artifacts/
+*.spec
+*.part
+*.ytdl
+
+# FFmpeg is installed separately, not redistributed
+/bin/*
+!/bin/README.md
+
+# Editor and OS state
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
