@@ -1,27 +1,31 @@
-# Doom Downloader v1.0.0
+# Doom Downloader v1.1.0
 
-The first public release of Doom Downloader, a Windows desktop app for web media and direct files.
+A modular, high-performance media downloading engine and Windows desktop application for web media and direct files.
 
-## Included
+## What's New in v1.1.0
 
-- Audio, Video, and File modes.
-- Audio conversion, video quality presets, and embedded artwork.
-- General website media extraction through yt-dlp.
-- Direct downloads for documents, images, archives, and other HTTP(S) files.
-- Single/Bulk input, concurrent queue, cancellation, retries, and duplicate checks.
-- Collapsible file browser and light/dark themes.
+- **Decoupled Backend Engine (`core/`)**:
+  - The core engine now has **zero GUI dependencies** and can be used as a standalone Python library (`from core import DoomEngine`).
+  - Supports embedding into web backends (FastAPI/Flask/Django), scripts, and automated bots.
+- **Headless CLI & JSON IPC (`--cli`)**:
+  - Enables external frontends (**C# / .NET / Avalonia / WPF**, Electron, Bash) to control the engine over standard I/O streams using `--json-progress`.
+  - Supports `--info <URL>`, `--download <URL>`, `--formats`, and `--check`.
+- **Headless HTTP REST API Server (`--server`)**:
+  - Built-in lightweight REST API server using standard library `ThreadingHTTPServer` (no extra dependencies).
+  - Provides `/api/status`, `/api/formats`, `/api/info`, `/api/download`, and `/api/queue` endpoints with full CORS support.
+- **Multi-Mode Entrypoint (`main.py`)**:
+  - Automatically routes to Desktop GUI (default), Headless CLI (`--cli`), or REST Server (`--server`).
+- **Comprehensive Automated Test Suite**:
+  - 21 automated unit and integration tests passing across engine, CLI, server, formats, and UI.
 
-## Install
+## Install & Run
 
-1. Download and extract `doom-downloader-1.0.0-source.zip`.
+1. Download and extract `doom-downloader-1.1.0-source.zip`.
 2. Install Python 3.11 or newer.
-3. Install FFmpeg and FFprobe on PATH, or place their executables in `bin/`.
-4. Run `Launch.bat`. It creates a virtual environment and installs dependencies.
+3. Install FFmpeg and FFprobe on PATH or place executables in `bin/`.
+4. Double-click `Launch.bat` to launch the Desktop GUI, or run:
+   - `python main.py` for Desktop GUI
+   - `python main.py --cli --help` for Headless CLI
+   - `python main.py --server` for REST API Server
 
-This is a source release, not a standalone executable. Local settings, environments, downloads, and FFmpeg binaries are excluded. `SHA256SUMS.txt` contains the archive checksum.
-
-## Validation and limits
-
-Thirteen tests pass locally, including HTTP file transfers, embedded media extraction with real FFmpeg, and interface checks. Arbitrary external websites have not all been verified. DRM, login requirements, and site restrictions can prevent downloads; the app does not bypass them.
-
-See the README for controls and supported output formats.
+`SHA256SUMS.txt` contains the archive checksum.
