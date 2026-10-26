@@ -1,5 +1,9 @@
 """
 Doom Downloader entry point.
+Supports:
+  - Desktop GUI (default, when run without arguments)
+  - Headless CLI / JSON IPC (--cli, --info, --download, --formats, --check)
+  - Headless REST API Server (--server)
 """
 
 import os
@@ -15,25 +19,35 @@ bin_dir = os.path.join(PROJECT_ROOT, "bin")
 if os.path.isdir(bin_dir):
     os.environ["PATH"] = bin_dir + os.pathsep + os.environ.get("PATH", "")
 
-from core.config import config
-from core.downloader import AudioDownloader, find_ffmpeg_dir
-from core.queue_manager import QueueManager
-from gui.app import DownloaderApp
 
 def main():
-    # Detect FFmpeg
-    ffmpeg_dir = find_ffmpeg_dir()
-    if ffmpeg_dir:
-        print(f"[Doom Downloader] FFmpeg: {ffmpeg_dir}")
+    # 1. Server mode
+    if len(sys.argv) > 1 and sys.argv[1] in ("--server", "-s"):
+        from core.server import main as server_main
+        sys.argv.pop(1)
+        server_main()
+        return
+
+    # 2. CLI mode
+    cli_flags = ("--cli", "-c", "--info", "-i", "--download", "-d", "--formats", "--check")
+    if len(sys.argv) > 1 and any(arg in cli_flags for arg in sys.argv[1:]):
+        from core.cli import main as cli_main
+        args = [arg for arg in sys.argv[1:] if arg not in ("--cli", "-c")]
+        sys.exit(cli_main(args))
+
+    # 3. Default: Desktop GUI Frontend
+    from core import DoomEngine
+    from gui.app import DownloaderApp
+
+    engine = DoomEngine()
+    if engine.is_ffmpeg_ready():
+        print(f"[Doom Downloader] FFmpeg: {engine.ffmpeg_dir}")
     else:
         print("[Doom Downloader] Warning: FFmpeg not detected in bin or PATH.")
 
-    downloader = AudioDownloader(ffmpeg_dir=ffmpeg_dir)
-    max_workers = config.get("max_concurrent_downloads", 2)
-    queue_manager = QueueManager(downloader=downloader, max_workers=max_workers)
-
-    app = DownloaderApp(downloader=downloader, queue_manager=queue_manager)
+    app = DownloaderApp(downloader=engine.downloader, queue_manager=engine.queue_manager)
     app.mainloop()
+
 
 if __name__ == "__main__":
     main()

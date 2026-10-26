@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.1.0 — 2026-10-26
+
+Decoupled core download engine from UI frontends.
+
+- Standalone `DoomEngine` backend facade with zero GUI dependencies.
+- Headless CLI & line-delimited JSON IPC interface (`--cli`, `--json-progress`) for .NET, Avalonia, WPF, and external processes.
+- Headless HTTP REST API server (`--server`) with full queue management and CORS support.
+- Multi-mode entry point in `main.py` routing to GUI, CLI, or Server modes.
+- Expanded automated test suite with 21 unit and integration tests covering engine, CLI, and REST API.
+- Updated documentation with external frontend integration examples.
+
 ## 1.0.0 — 2026-10-25
 
 Initial public release.
