@@ -21,6 +21,7 @@ DEFAULT_SETTINGS = {
     "skip_existing": True,
     "add_metadata": True,
     "max_concurrent_downloads": 2,
+    "browser_cookies": "none",
     "theme": "Light",
     "color_accent": "blue"
 }

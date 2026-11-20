@@ -23,6 +23,8 @@ class QueueItemStatus:
     EXISTS = "EXISTS"
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
+    PAUSED = "PAUSED"
+
 
 class DownloadItem:
     def __init__(
@@ -70,6 +72,7 @@ class DownloadItem:
         self.added_at = time.time()
         self.finished_at = 0.0
         self.force_redownload = False
+        self.http_headers: Dict[str, str] = {}
 
         self.cancel_event = threading.Event()
 
@@ -78,6 +81,18 @@ class DownloadItem:
         if self.status in [QueueItemStatus.QUEUED, QueueItemStatus.FETCHING]:
             self.status = QueueItemStatus.CANCELLED
             self.status_message = "Cancelled by user"
+
+    def pause(self):
+        self.cancel_event.set()
+        self.status = QueueItemStatus.PAUSED
+        self.status_message = "Paused by user"
+
+    def reset_for_resume(self):
+        self.cancel_event.clear()
+        self.status = QueueItemStatus.QUEUED
+        self.status_message = "Resuming in queue..."
+        self.error_message = ""
+        self.force_redownload = False
 
     def reset_for_retry(self):
         self.cancel_event.clear()
@@ -90,6 +105,7 @@ class DownloadItem:
         self.error_message = ""
         self.filepath = ""
         self.force_redownload = True
+
 
 class QueueManager:
     def __init__(self, downloader: AudioDownloader, max_workers: int = 2):
@@ -166,13 +182,30 @@ class QueueManager:
                 self.on_item_updated(item)
             self._notify_stats()
 
+    def pause_item(self, item_id: str):
+        item = self.get_item(item_id)
+        if item and item.status in [QueueItemStatus.QUEUED, QueueItemStatus.DOWNLOADING, QueueItemStatus.FETCHING]:
+            item.pause()
+            if self.on_item_updated:
+                self.on_item_updated(item)
+            self._notify_stats()
+
+    def resume_item(self, item_id: str):
+        item = self.get_item(item_id)
+        if item and item.status in [QueueItemStatus.PAUSED, QueueItemStatus.FAILED, QueueItemStatus.CANCELLED]:
+            item.reset_for_resume()
+            if self.on_item_updated:
+                self.on_item_updated(item)
+            self._notify_stats()
+
     def retry_item(self, item_id: str):
         item = self.get_item(item_id)
-        if item and item.status in [QueueItemStatus.FAILED, QueueItemStatus.CANCELLED, QueueItemStatus.EXISTS]:
+        if item and item.status in [QueueItemStatus.FAILED, QueueItemStatus.CANCELLED, QueueItemStatus.EXISTS, QueueItemStatus.PAUSED]:
             item.reset_for_retry()
             if self.on_item_updated:
                 self.on_item_updated(item)
             self._notify_stats()
+
 
     def remove_item(self, item_id: str) -> bool:
         with self.lock:
@@ -265,21 +298,35 @@ class QueueManager:
                     self._notify_item_update(item)
 
                     try:
-                        info = self.downloader.fetch_video_info(item.url)
+                        info = self.downloader.fetch_video_info(item.url, http_headers=item.http_headers)
                         item.source_id = info.get("id", "")
                         item.title = info.get("title", item.title)
                         item.artist = info.get("uploader", item.artist)
                         item.duration = info.get("duration", item.duration)
                         item.thumbnail_url = info.get("thumbnail", item.thumbnail_url)
-
-                        # Fetch thumbnail for UI card
-                        if item.thumbnail_url and not item.thumbnail_image:
-                            from .tagger import fetch_thumbnail_jpeg
-                            res = fetch_thumbnail_jpeg(item.thumbnail_url, square_crop=item.crop_square)
-                            if res:
-                                item.thumbnail_image = res[1]
                     except Exception:
-                        pass
+                        from .scraper import detect_and_resolve_media
+                        try:
+                            resolved = detect_and_resolve_media(item.url, ffmpeg_dir=self.downloader.ffmpeg_dir)
+                            if resolved.get("stream_url"):
+                                item.url = resolved["stream_url"]
+                            if resolved.get("http_headers"):
+                                item.http_headers = resolved["http_headers"]
+                            if resolved.get("title") and resolved["title"] != "Unknown Media":
+                                item.title = resolved["title"]
+                            if resolved.get("thumbnail_url"):
+                                item.thumbnail_url = resolved["thumbnail_url"]
+                            if resolved.get("artist"):
+                                item.artist = resolved["artist"]
+                        except Exception:
+                            pass
+
+                    # Fetch thumbnail for UI card
+                    if item.thumbnail_url and not item.thumbnail_image:
+                        from .tagger import fetch_thumbnail_jpeg
+                        res = fetch_thumbnail_jpeg(item.thumbnail_url, square_crop=item.crop_square)
+                        if res:
+                            item.thumbnail_image = res[1]
 
                     self._notify_item_update(item)
 
@@ -291,15 +338,27 @@ class QueueManager:
 
             # Check if file already exists in destination folder (Duplicate Detection)
             fmt_info = get_format_info(item.format_label)
-            target_ext = fmt_info["ext"]
             skip_existing = item.skip_existing
 
             if skip_existing and not item.force_redownload:
-                from .downloader import find_existing_song
-                lookup_title = f"{item.title} [{item.source_id}]" if fmt_info.get("kind") == "video" and item.source_id else item.title
-                existing_file = find_existing_song(item.download_dir, lookup_title, target_ext)
-                if fmt_info.get("kind") != "video" and not existing_file and item.artist and item.artist != "YouTube":
-                    existing_file = find_existing_song(item.download_dir, f"{item.artist} - {item.title}", target_ext)
+                from .downloader import find_existing_media
+                existing_file = find_existing_media(
+                    download_dir=item.download_dir,
+                    title=item.title,
+                    format_label=item.format_label,
+                    source_id=item.source_id,
+                    url=item.url,
+                    ffmpeg_dir=self.downloader.ffmpeg_dir
+                )
+                if not existing_file and fmt_info.get("kind") != "video" and item.artist and item.artist != "YouTube":
+                    existing_file = find_existing_media(
+                        download_dir=item.download_dir,
+                        title=f"{item.artist} - {item.title}",
+                        format_label=item.format_label,
+                        source_id=item.source_id,
+                        url=item.url,
+                        ffmpeg_dir=self.downloader.ffmpeg_dir
+                    )
 
                 if existing_file:
                     item.status = QueueItemStatus.EXISTS
@@ -308,7 +367,7 @@ class QueueManager:
                     item.speed = 0.0
                     item.speed_str = "0 KB/s"
                     item.eta_str = "Found"
-                    item.status_message = "Song already exists in destination folder • Skipped re-download"
+                    item.status_message = f"Media already downloaded at {existing_file} • Skipped re-download"
                     item.finished_at = time.time()
                     self._notify_item_update(item)
                     self._notify_stats()
@@ -316,6 +375,11 @@ class QueueManager:
 
             # 2. Resolve download target URL
             target_stream_url = item.url
+            from .bilibili import is_bilibili_url, clean_bilibili_url
+            if is_bilibili_url(target_stream_url):
+                target_stream_url = clean_bilibili_url(target_stream_url)
+                item.url = target_stream_url
+
             if is_spotify:
                 item.status = QueueItemStatus.FETCHING
                 item.status_message = "Finding audio stream..."
@@ -367,7 +431,8 @@ class QueueManager:
                 cancel_event=item.cancel_event,
                 custom_title=item.title if is_spotify else None,
                 custom_artist=item.artist if is_spotify else None,
-                custom_thumbnail_url=item.thumbnail_url if is_spotify else None
+                custom_thumbnail_url=item.thumbnail_url if is_spotify else None,
+                http_headers=getattr(item, "http_headers", {})
             )
 
             item.status = QueueItemStatus.COMPLETED
@@ -375,17 +440,39 @@ class QueueManager:
             item.filepath = final_path
             item.status_message = "Completed • Saved with cover art"
             item.finished_at = time.time()
+            try:
+                from .history import add_download_record
+                add_download_record(
+                    filepath=final_path,
+                    title=item.title,
+                    artist=item.artist,
+                    url=item.url,
+                    format_label=item.format_label,
+                    thumbnail_url=item.thumbnail_url,
+                    size=item.total_bytes
+                )
+            except Exception:
+                pass
             self._notify_item_update(item)
 
         except DownloadCancelledException:
-            item.status = QueueItemStatus.CANCELLED
-            item.status_message = "Cancelled by user"
+            if item.status != QueueItemStatus.PAUSED:
+                item.status = QueueItemStatus.CANCELLED
+                item.status_message = "Cancelled by user"
+            else:
+                item.status_message = "Paused by user"
             self._notify_item_update(item)
 
         except Exception as e:
-            item.status = QueueItemStatus.CANCELLED if item.cancel_event.is_set() else QueueItemStatus.FAILED
-            item.error_message = str(e)
-            item.status_message = f"Failed: {str(e)[:70]}"
+            if item.status == QueueItemStatus.PAUSED:
+                item.status_message = "Paused by user"
+            elif item.cancel_event.is_set():
+                item.status = QueueItemStatus.CANCELLED
+                item.status_message = "Cancelled by user"
+            else:
+                item.status = QueueItemStatus.FAILED
+                item.error_message = str(e)
+                item.status_message = f"Failed: {str(e)[:70]}"
             self._notify_item_update(item)
 
         finally:
@@ -402,21 +489,49 @@ class QueueManager:
 
         def progress(data):
             for key in ("percent", "speed", "speed_str", "eta_str", "downloaded_bytes", "total_bytes"):
-                setattr(item, key, data[key])
-            item.status_message = f"{item.speed_str} · {item.eta_str} remaining"
+                if key in data:
+                    setattr(item, key, data[key])
+            conns = data.get("connections")
+            conns_str = f" · {conns} conns" if conns and conns > 1 else ""
+            item.status_message = f"{item.speed_str} · {item.eta_str} remaining{conns_str}"
             self._notify_item_update(item)
             self._notify_stats()
 
-        path, exists = download_file(item.url, item.download_dir, progress, item.cancel_event,
-                                    item.skip_existing and not item.force_redownload)
-        item.filepath = path
-        item.title = os.path.basename(path)
-        item.status = QueueItemStatus.EXISTS if exists else QueueItemStatus.COMPLETED
-        item.status_message = "Already in folder" if exists else "Completed"
-        item.percent = 100
-        item.speed = 0
-        item.finished_at = time.time()
-        self._notify_item_update(item)
+        try:
+            path, exists = download_file(
+                item.url, item.download_dir, progress, item.cancel_event,
+                item.skip_existing and not item.force_redownload
+            )
+            item.filepath = path
+            item.title = os.path.basename(path)
+            item.status = QueueItemStatus.EXISTS if exists else QueueItemStatus.COMPLETED
+            item.status_message = "Already in folder" if exists else "Completed"
+            item.percent = 100
+            item.speed = 0
+            item.finished_at = time.time()
+            try:
+                from .history import add_download_record
+                add_download_record(
+                    filepath=path,
+                    title=item.title,
+                    artist=item.artist,
+                    url=item.url,
+                    format_label=item.format_label,
+                    thumbnail_url=item.thumbnail_url,
+                    size=item.total_bytes
+                )
+            except Exception:
+                pass
+            self._notify_item_update(item)
+        except DownloadCancelledException:
+            if item.status != QueueItemStatus.PAUSED:
+                item.status = QueueItemStatus.CANCELLED
+                item.status_message = "Cancelled by user"
+            else:
+                item.status_message = "Paused by user"
+            self._notify_item_update(item)
+            raise
+
 
     def _notify_item_update(self, item: DownloadItem):
         if self.on_item_updated:
@@ -437,6 +552,7 @@ class QueueManager:
             exists_count = sum(1 for i in self.items if i.status == QueueItemStatus.EXISTS)
             failed = sum(1 for i in self.items if i.status == QueueItemStatus.FAILED)
             cancelled = sum(1 for i in self.items if i.status == QueueItemStatus.CANCELLED)
+            paused = sum(1 for i in self.items if i.status == QueueItemStatus.PAUSED)
 
             # Aggregate speed
             active_speeds = [i.speed for i in self.items if i.status == QueueItemStatus.DOWNLOADING and i.speed > 0]
@@ -456,6 +572,7 @@ class QueueManager:
                 "exists": exists_count,
                 "failed": failed,
                 "cancelled": cancelled,
+                "paused": paused,
                 "is_paused": self.is_paused,
                 "total_speed_str": speed_str
             }

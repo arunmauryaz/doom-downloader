@@ -1,6 +1,7 @@
 """
 Download queue item card widget.
 Minimalist, high-contrast monochrome design with a three-dots context menu (⋮).
+Supports play, pause, resume, retry, redownload, and cancel.
 """
 
 import os
@@ -16,6 +17,7 @@ from gui.theme import (
     STATUS_COLORS, FONT_BOLD, FONT_BODY, FONT_SMALL, FONT_BADGE
 )
 
+
 def format_duration(seconds: int) -> str:
     if not seconds:
         return ""
@@ -25,6 +27,7 @@ def format_duration(seconds: int) -> str:
         return f"{h}:{m:02d}:{s:02d}"
     return f"{m:02d}:{s:02d}"
 
+
 class QueueItemCard(ctk.CTkFrame):
     def __init__(
         self,
@@ -33,6 +36,8 @@ class QueueItemCard(ctk.CTkFrame):
         on_cancel: Optional[Callable[[str], None]] = None,
         on_retry: Optional[Callable[[str], None]] = None,
         on_remove: Optional[Callable[[str], None]] = None,
+        on_pause: Optional[Callable[[str], None]] = None,
+        on_resume: Optional[Callable[[str], None]] = None,
         **kwargs
     ):
         super().__init__(
@@ -47,6 +52,8 @@ class QueueItemCard(ctk.CTkFrame):
         self.on_cancel = on_cancel
         self.on_retry = on_retry
         self.on_remove = on_remove
+        self.on_pause = on_pause
+        self.on_resume = on_resume
         self._ctk_thumb = None
 
         self.fmt_info = get_format_info(item.format_label)
@@ -144,11 +151,11 @@ class QueueItemCard(ctk.CTkFrame):
         )
         self.status_badge.grid(row=0, column=0, padx=(0, 6))
 
-        # Quick Action Button (Play when completed, or cancel when active)
+        # Quick Action Button (Play when completed, Pause/Resume when active)
         self.quick_btn = ctk.CTkButton(
             self.right_frame,
             text="▶ Play",
-            width=54,
+            width=62,
             height=26,
             font=FONT_SMALL,
             fg_color="#f1f5f9",
@@ -216,6 +223,8 @@ class QueueItemCard(ctk.CTkFrame):
             badge_text = "DONE"
         elif status == QueueItemStatus.DOWNLOADING:
             badge_text = f"{int(self.item.percent)}%"
+        elif status == QueueItemStatus.PAUSED:
+            badge_text = "PAUSED"
 
         bg_col, fg_col = STATUS_COLORS.get(status, ("#f1f5f9", "#475569"))
         self.status_badge.configure(
@@ -229,10 +238,13 @@ class QueueItemCard(ctk.CTkFrame):
             self.quick_btn.configure(text="▶ Play", state="normal")
             self.quick_btn.grid(row=0, column=1, padx=(0, 4))
         elif status in [QueueItemStatus.DOWNLOADING, QueueItemStatus.FETCHING]:
-            self.quick_btn.configure(text="✕", state="normal")
+            self.quick_btn.configure(text="⏸ Pause", state="normal")
+            self.quick_btn.grid(row=0, column=1, padx=(0, 4))
+        elif status == QueueItemStatus.PAUSED:
+            self.quick_btn.configure(text="▶ Resume", state="normal")
             self.quick_btn.grid(row=0, column=1, padx=(0, 4))
         elif status in [QueueItemStatus.FAILED, QueueItemStatus.CANCELLED]:
-            self.quick_btn.configure(text="↻", state="normal")
+            self.quick_btn.configure(text="↻ Redo", state="normal")
             self.quick_btn.grid(row=0, column=1, padx=(0, 4))
         else:
             self.quick_btn.grid_forget()
@@ -242,8 +254,15 @@ class QueueItemCard(ctk.CTkFrame):
         if status in [QueueItemStatus.COMPLETED, QueueItemStatus.EXISTS]:
             self._play_file()
         elif status in [QueueItemStatus.DOWNLOADING, QueueItemStatus.FETCHING]:
-            if self.on_cancel:
+            if self.on_pause:
+                self.on_pause(self.item.id)
+            elif self.on_cancel:
                 self.on_cancel(self.item.id)
+        elif status == QueueItemStatus.PAUSED:
+            if self.on_resume:
+                self.on_resume(self.item.id)
+            elif self.on_retry:
+                self.on_retry(self.item.id)
         elif status in [QueueItemStatus.FAILED, QueueItemStatus.CANCELLED]:
             if self.on_retry:
                 self.on_retry(self.item.id)
@@ -264,11 +283,41 @@ class QueueItemCard(ctk.CTkFrame):
 
         status = self.item.status
 
-        # Action: Resume / Retry (Stuck, cancelled, or failed)
-        if status in [QueueItemStatus.FAILED, QueueItemStatus.CANCELLED, QueueItemStatus.EXISTS]:
-            action_label = "Resume / Retry Download" if status != QueueItemStatus.EXISTS else "Redownload / Overwrite"
+        # Action: Pause / Resume / Redo
+        if status in [QueueItemStatus.DOWNLOADING, QueueItemStatus.FETCHING]:
             menu.add_command(
-                label=f"↻  {action_label}",
+                label="⏸  Pause Download",
+                command=lambda: self.on_pause(self.item.id) if self.on_pause else (self.on_cancel(self.item.id) if self.on_cancel else None)
+            )
+            menu.add_command(
+                label="✕  Cancel Download",
+                command=lambda: self.on_cancel(self.item.id) if self.on_cancel else None
+            )
+        elif status == QueueItemStatus.PAUSED:
+            menu.add_command(
+                label="▶  Resume Download",
+                command=lambda: self.on_resume(self.item.id) if self.on_resume else (self.on_retry(self.item.id) if self.on_retry else None)
+            )
+            menu.add_command(
+                label="↻  Redownload / Redo from Start",
+                command=lambda: self.on_retry(self.item.id) if self.on_retry else None
+            )
+            menu.add_command(
+                label="✕  Cancel Download",
+                command=lambda: self.on_cancel(self.item.id) if self.on_cancel else None
+            )
+        elif status in [QueueItemStatus.FAILED, QueueItemStatus.CANCELLED]:
+            menu.add_command(
+                label="▶  Resume Download",
+                command=lambda: self.on_resume(self.item.id) if self.on_resume else (self.on_retry(self.item.id) if self.on_retry else None)
+            )
+            menu.add_command(
+                label="↻  Redownload / Redo from Start",
+                command=lambda: self.on_retry(self.item.id) if self.on_retry else None
+            )
+        elif status == QueueItemStatus.EXISTS:
+            menu.add_command(
+                label="↻  Redownload / Overwrite",
                 command=lambda: self.on_retry(self.item.id) if self.on_retry else None
             )
 
@@ -276,13 +325,6 @@ class QueueItemCard(ctk.CTkFrame):
         if self.item.filepath and os.path.isfile(self.item.filepath):
             menu.add_command(label="▶  Play media", command=self._play_file)
             menu.add_command(label="📁  Show in File Explorer", command=self._open_in_folder)
-
-        # Action: Cancel (if active)
-        if status in [QueueItemStatus.DOWNLOADING, QueueItemStatus.FETCHING, QueueItemStatus.QUEUED]:
-            menu.add_command(
-                label="✕  Cancel Download",
-                command=lambda: self.on_cancel(self.item.id) if self.on_cancel else None
-            )
 
         menu.add_separator()
 
@@ -295,7 +337,6 @@ class QueueItemCard(ctk.CTkFrame):
             command=lambda: self.on_remove(self.item.id) if self.on_remove else None
         )
 
-        # Calculate position under the button
         try:
             x = self.menu_btn.winfo_rootx()
             y = self.menu_btn.winfo_rooty() + self.menu_btn.winfo_height() + 2

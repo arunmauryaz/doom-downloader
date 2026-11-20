@@ -39,7 +39,8 @@ STATUS_COLORS = {
     "COMPLETED": ("#f0fdf4", "#166534"),
     "EXISTS": ("#f1f5f9", "#334155"),
     "FAILED": ("#fef2f2", "#991b1b"),
-    "CANCELLED": ("#f4f4f5", "#71717a")
+    "CANCELLED": ("#f4f4f5", "#71717a"),
+    "PAUSED": ("#fef3c7", "#b45309")
 }
 
 # Typography

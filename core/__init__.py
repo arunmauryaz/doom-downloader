@@ -10,7 +10,7 @@ from .queue_manager import QueueManager, DownloadItem, QueueItemStatus
 from .direct import download_file, safe_filename
 from .formats import (
     FORMAT_NAMES, VIDEO_FORMAT_NAMES, AUDIO_FORMATS, VIDEO_FORMATS,
-    DEFAULT_FORMAT, FILE_FORMAT, get_format_info
+    DEFAULT_FORMAT, FILE_FORMAT, get_format_info, resolve_format_alias
 )
 from .url_parser import (
     extract_urls_from_text, is_playlist_url, fetch_playlist_entries, clean_video_url
@@ -19,6 +19,7 @@ from .spotify import (
     is_spotify_url, is_spotify_playlist_or_album, fetch_spotify_track,
     fetch_spotify_collection, resolve_spotify_to_youtube
 )
+from .scraper import detect_and_resolve_media
 from .config import config
 
 # Alias
@@ -42,6 +43,7 @@ __all__ = [
     "DEFAULT_FORMAT",
     "FILE_FORMAT",
     "get_format_info",
+    "resolve_format_alias",
     "extract_urls_from_text",
     "is_playlist_url",
     "fetch_playlist_entries",
@@ -51,5 +53,6 @@ __all__ = [
     "fetch_spotify_track",
     "fetch_spotify_collection",
     "resolve_spotify_to_youtube",
+    "detect_and_resolve_media",
     "config",
 ]

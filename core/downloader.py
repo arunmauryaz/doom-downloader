@@ -7,10 +7,12 @@ displays the thumbnail in Windows Explorer and media players without creating se
 import os
 import sys
 import shutil
+import subprocess
 import threading
 from typing import Callable, Optional, Dict, Any
 import yt_dlp
 from mutagen.id3 import ID3
+from .config import config
 from .formats import get_format_info
 from .tagger import fetch_thumbnail_jpeg, embed_artwork
 
@@ -99,18 +101,168 @@ def find_existing_song(download_dir: str, title: str, ext: str) -> Optional[str]
 
     return None
 
+
+def probe_video_height(filepath: str, ffmpeg_dir: Optional[str] = None) -> Optional[int]:
+    """Probes the vertical resolution (height in pixels) of a video file using ffprobe."""
+    if not filepath or not os.path.isfile(filepath):
+        return None
+    ffprobe_bin = "ffprobe"
+    if ffmpeg_dir:
+        cand = os.path.join(ffmpeg_dir, "ffprobe.exe" if sys.platform == "win32" else "ffprobe")
+        if os.path.isfile(cand):
+            ffprobe_bin = cand
+    else:
+        f_dir = find_ffmpeg_dir()
+        if f_dir:
+            cand = os.path.join(f_dir, "ffprobe.exe" if sys.platform == "win32" else "ffprobe")
+            if os.path.isfile(cand):
+                ffprobe_bin = cand
+    try:
+        cmd = [
+            ffprobe_bin,
+            "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=height",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            os.path.abspath(filepath)
+        ]
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=5)
+        if res.returncode == 0 and res.stdout.strip():
+            return int(res.stdout.strip())
+    except Exception:
+        pass
+    return None
+
+
+def find_existing_media(
+    download_dir: str,
+    title: str,
+    format_label: str,
+    source_id: str = "",
+    url: str = "",
+    ffmpeg_dir: Optional[str] = None
+) -> Optional[str]:
+    """
+    Checks if media matching the exact requested format, resolution, and container
+    already exists in download_dir.
+    Prevents false duplicates between different resolutions (e.g. 1080p vs 720p),
+    different video containers, or video vs audio.
+    Returns the absolute path to the existing file if found, otherwise None.
+    """
+    if not os.path.isdir(download_dir) or not title:
+        return None
+
+    fmt_info = get_format_info(format_label)
+    kind = fmt_info.get("kind", "audio")
+    target_ext = fmt_info.get("ext", "").lower()
+    height = fmt_info.get("height")
+
+    if not target_ext:
+        return None
+
+    # Mode 1: Video format
+    if kind == "video":
+        res_tag = f" [{height}p]" if height else ""
+
+        candidates = []
+        if source_id:
+            candidates.append(f"{title} [{source_id}]{res_tag}")
+        candidates.append(f"{title}{res_tag}")
+
+        for cand in candidates:
+            exact_p = os.path.join(download_dir, f"{cand}.{target_ext}")
+            if os.path.isfile(exact_p) and os.path.getsize(exact_p) > 10240:
+                return os.path.abspath(exact_p)
+
+            try:
+                with yt_dlp.YoutubeDL({'outtmpl': os.path.join(download_dir, '%(title)s.%(ext)s'), 'quiet': True}) as ydl:
+                    exp = ydl.prepare_filename({'title': cand, 'ext': target_ext})
+                    if os.path.isfile(exp) and os.path.getsize(exp) > 10240:
+                        return os.path.abspath(exp)
+            except Exception:
+                pass
+
+        target_norms = [normalize_title(c) for c in candidates if c]
+        try:
+            for f in os.listdir(download_dir):
+                if f.lower().endswith(f".{target_ext}"):
+                    base = os.path.splitext(f)[0]
+                    norm_base = normalize_title(base)
+                    if norm_base in target_norms:
+                        candidate_path = os.path.join(download_dir, f)
+                        if os.path.isfile(candidate_path) and os.path.getsize(candidate_path) > 10240:
+                            return os.path.abspath(candidate_path)
+        except Exception:
+            pass
+
+        # Check existing files without resolution tag (e.g. legacy downloads or "Best available")
+        if source_id:
+            untagged_title = f"{title} [{source_id}]"
+            untagged_path = find_existing_song(download_dir, untagged_title, target_ext)
+            if untagged_path and os.path.isfile(untagged_path):
+                if height is None:
+                    return os.path.abspath(untagged_path)
+
+                # Check download history records
+                try:
+                    from .history import get_download_history
+                    for rec in get_download_history(check_exists=False):
+                        if os.path.abspath(rec.get("path", "")) == os.path.abspath(untagged_path):
+                            rec_fmt = rec.get("format_label", "")
+                            rec_info = get_format_info(rec_fmt)
+                            if rec_info.get("height") == height:
+                                return os.path.abspath(untagged_path)
+                            elif rec_info.get("height") is not None:
+                                untagged_path = None
+                            break
+                except Exception:
+                    pass
+
+                # Probe actual video stream height if file is present
+                if untagged_path:
+                    probed = probe_video_height(untagged_path, ffmpeg_dir)
+                    if probed is not None:
+                        if abs(probed - height) <= 16:
+                            return os.path.abspath(untagged_path)
+                        else:
+                            return None
+
+        return None
+
+    # Mode 2: Audio format
+    existing_audio = find_existing_song(download_dir, title, target_ext)
+    if existing_audio:
+        return os.path.abspath(existing_audio)
+
+    return None
+
+
 class AudioDownloader:
-    def __init__(self, ffmpeg_dir: Optional[str] = None):
+    def __init__(self, ffmpeg_dir: Optional[str] = None, browser_cookies: Optional[str] = None):
         self.ffmpeg_dir = ffmpeg_dir or find_ffmpeg_dir()
         if self.ffmpeg_dir:
             os.environ["PATH"] = self.ffmpeg_dir + os.pathsep + os.environ.get("PATH", "")
+        self.browser_cookies = browser_cookies if browser_cookies is not None else config.get("browser_cookies", "none")
 
     def is_ffmpeg_available(self) -> bool:
         if not self.ffmpeg_dir:
             return False
         return os.path.isfile(os.path.join(self.ffmpeg_dir, "ffmpeg.exe"))
 
-    def fetch_video_info(self, url: str) -> Dict[str, Any]:
+    def _execute_ydl(self, opts: Dict[str, Any], action: Callable[[Any], Any]) -> Any:
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                return action(ydl)
+        except Exception as e:
+            err_msg = str(e)
+            if "cookiesfrombrowser" in opts and ("decrypt" in err_msg.lower() or "cookie" in err_msg.lower() or "dpapi" in err_msg.lower()):
+                retry_opts = opts.copy()
+                retry_opts.pop("cookiesfrombrowser", None)
+                with yt_dlp.YoutubeDL(retry_opts) as ydl:
+                    return action(ydl)
+            raise
+
+    def fetch_video_info(self, url: str, http_headers: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
         """Fetches title, duration, best thumbnail, and uploader for a single video."""
         opts = {
             'noplaylist': True,
@@ -123,22 +275,34 @@ class AudioDownloader:
         }
         if self.ffmpeg_dir:
             opts['ffmpeg_location'] = self.ffmpeg_dir
+        headers = {}
+        from .bilibili import is_bilibili_url, clean_bilibili_url, BILIBILI_HEADERS
+        if is_bilibili_url(url):
+            url = clean_bilibili_url(url)
+            headers.update(BILIBILI_HEADERS)
+        if http_headers:
+            headers.update(http_headers)
+        if headers:
+            opts['http_headers'] = headers
 
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            if not info:
-                raise RuntimeError('No media found at this link.')
-            if info.get('_type') == 'playlist':
-                raise RuntimeError('This page contains a collection. Enable Collections or use a media link.')
-            best_thumb = get_best_thumbnail_url(info)
-            return {
-                'id': info.get('id', ''),
-                'title': info.get('title', 'Unknown Title'),
-                'uploader': info.get('uploader') or info.get('channel', 'Unknown Artist'),
-                'duration': info.get('duration', 0),
-                'thumbnail': best_thumb,
-                'webpage_url': info.get('webpage_url', url)
-            }
+        b_cookies = self.browser_cookies or config.get("browser_cookies", "none")
+        if b_cookies and b_cookies.lower() != "none":
+            opts['cookiesfrombrowser'] = (b_cookies.lower(),)
+
+        info = self._execute_ydl(opts, lambda ydl: ydl.extract_info(url, download=False))
+        if not info:
+            raise RuntimeError('No media found at this link.')
+        if info.get('_type') == 'playlist':
+            raise RuntimeError('This page contains a collection. Enable Collections or use a media link.')
+        best_thumb = get_best_thumbnail_url(info)
+        return {
+            'id': info.get('id', ''),
+            'title': info.get('title', 'Unknown Title'),
+            'uploader': info.get('uploader') or info.get('channel', 'Unknown Artist'),
+            'duration': info.get('duration', 0),
+            'thumbnail': best_thumb,
+            'webpage_url': info.get('webpage_url', url)
+        }
 
     def download_media(self, **kwargs) -> str:
         if get_format_info(kwargs["format_label"]).get("kind") == "video":
@@ -146,18 +310,18 @@ class AudioDownloader:
         return self.download_audio(**kwargs)
 
     def download_video(self, url, download_dir, format_label, add_metadata=True,
-                       progress_callback=None, cancel_event=None, **kwargs):
+                       progress_callback=None, cancel_event=None, http_headers=None, **kwargs):
         if not self.is_ffmpeg_available():
             raise RuntimeError("FFmpeg is required for video merging. Place it in bin/.")
         fmt = get_format_info(format_label)
         ext, height = fmt["ext"], fmt["height"]
         cap = f"[height<=?{height}]" if height else ""
         if ext == "mp4":
-            selector = f"bv{cap}[ext=mp4]+ba[ext=m4a]/b{cap}[ext=mp4]"
+            selector = f"bv{cap}[ext=mp4]+ba[ext=m4a]/bv{cap}+ba/b{cap}[ext=mp4]/b{cap}/best"
         elif ext == "webm":
-            selector = f"bv{cap}[ext=webm]+ba[ext=webm]/b{cap}[ext=webm]"
+            selector = f"bv{cap}[ext=webm]+ba[ext=webm]/bv{cap}+ba/b{cap}[ext=webm]/b{cap}/best"
         else:
-            selector = f"bv{cap}+ba/b{cap}"
+            selector = f"bv{cap}+ba/b{cap}/best"
         final_paths = []
 
         def check_cancel():
@@ -187,16 +351,44 @@ class AudioDownloader:
         processors = [{"key": "FFmpegVideoRemuxer", "preferedformat": ext}]
         if add_metadata:
             processors.append({"key": "FFmpegMetadata", "add_metadata": True})
+        res_tag = f" [{height}p]" if height else ""
+        outtmpl = os.path.join(download_dir, f"%(title)s [%(id)s]{res_tag}.%(ext)s")
         opts = {"format": selector, "merge_output_format": ext,
-                "outtmpl": os.path.join(download_dir, "%(title)s [%(id)s].%(ext)s"),
+                "outtmpl": outtmpl,
                 "postprocessors": processors, "progress_hooks": [progress],
                 "postprocessor_hooks": [postprocess], "ffmpeg_location": self.ffmpeg_dir,
                 "noplaylist": True, "overwrites": True, "quiet": True, "retries": 3, "socket_timeout": 30}
+        headers = {}
+        from .bilibili import is_bilibili_url, clean_bilibili_url, BILIBILI_HEADERS
+        if is_bilibili_url(url):
+            url = clean_bilibili_url(url)
+            headers.update(BILIBILI_HEADERS)
+        if http_headers:
+            headers.update(http_headers)
+        elif kwargs.get("http_headers"):
+            headers.update(kwargs["http_headers"])
+        if headers:
+            opts["http_headers"] = headers
+
+        b_cookies = self.browser_cookies or config.get("browser_cookies", "none")
+        if b_cookies and b_cookies.lower() != "none":
+            opts["cookiesfrombrowser"] = (b_cookies.lower(),)
+
         os.makedirs(download_dir, exist_ok=True)
         check_cancel()
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(url, download=True)
+                try:
+                    info = ydl.extract_info(url, download=True)
+                except Exception as e:
+                    err_msg = str(e)
+                    if "cookiesfrombrowser" in opts and ("decrypt" in err_msg.lower() or "cookie" in err_msg.lower() or "dpapi" in err_msg.lower()):
+                        retry_opts = opts.copy()
+                        retry_opts.pop("cookiesfrombrowser", None)
+                        with yt_dlp.YoutubeDL(retry_opts) as r_ydl:
+                            info = r_ydl.extract_info(url, download=True)
+                    else:
+                        raise
                 check_cancel()
                 if not info:
                     raise RuntimeError("No video stream was returned.")
@@ -222,7 +414,9 @@ class AudioDownloader:
         cancel_event: Optional[threading.Event] = None,
         custom_title: Optional[str] = None,
         custom_artist: Optional[str] = None,
-        custom_thumbnail_url: Optional[str] = None
+        custom_thumbnail_url: Optional[str] = None,
+        http_headers: Optional[Dict[str, str]] = None,
+        **kwargs
     ) -> str:
         """
         Downloads audio and embeds the thumbnail artwork directly into the file.
@@ -332,10 +526,35 @@ class AudioDownloader:
 
         if self.ffmpeg_dir:
             ydl_opts['ffmpeg_location'] = self.ffmpeg_dir
+        headers = {}
+        from .bilibili import is_bilibili_url, clean_bilibili_url, BILIBILI_HEADERS
+        if is_bilibili_url(url):
+            url = clean_bilibili_url(url)
+            headers.update(BILIBILI_HEADERS)
+        if http_headers:
+            headers.update(http_headers)
+        elif kwargs.get("http_headers"):
+            headers.update(kwargs["http_headers"])
+        if headers:
+            ydl_opts['http_headers'] = headers
+
+        b_cookies = self.browser_cookies or config.get("browser_cookies", "none")
+        if b_cookies and b_cookies.lower() != "none":
+            ydl_opts['cookiesfrombrowser'] = (b_cookies.lower(),)
 
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=True)
+                try:
+                    info = ydl.extract_info(url, download=True)
+                except Exception as e:
+                    err_msg = str(e)
+                    if "cookiesfrombrowser" in ydl_opts and ("decrypt" in err_msg.lower() or "cookie" in err_msg.lower() or "dpapi" in err_msg.lower()):
+                        retry_opts = ydl_opts.copy()
+                        retry_opts.pop("cookiesfrombrowser", None)
+                        with yt_dlp.YoutubeDL(retry_opts) as r_ydl:
+                            info = r_ydl.extract_info(url, download=True)
+                    else:
+                        raise
                 if not info:
                     raise Exception("Failed to retrieve audio stream from YouTube")
 

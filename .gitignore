@@ -5,14 +5,16 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 settings.json
+download_history.json
 .env
 .env.*
 !.env.example
 *.log
 
-# Generated files and downloads
-/dist/
-/build/
+# Node & Desktop
+node_modules/
+dist/
+build/
 /artifacts/
 *.spec
 *.part

@@ -35,11 +35,14 @@ def extract_urls_from_text(text: str) -> List[str]:
             if is_spotify_url(token):
                 urls.append(token)
             continue
-        if not re.match(r"https?://", token, re.I):
-            if re.match(r"(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}(?::\d+)?(?:/|$)", token):
-                token = "https://" + token
-            else:
-                continue
+        # Extract embedded http(s) URL if wrapped in brackets or text like 【...】https://...
+        embedded = re.search(r'https?://[^\s<>"\'`]+', token, re.I)
+        if embedded:
+            token = embedded.group(0).rstrip("，。！？）】>\"'")
+        elif re.match(r"(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}(?::\d+)?(?:/|$)", token):
+            token = "https://" + token
+        else:
+            continue
         try:
             parsed = urllib.parse.urlsplit(token)
         except ValueError:
@@ -110,11 +113,15 @@ def clean_video_url(url: str) -> str:
     Extracts clean single track/video URL.
     For YouTube: extracts https://www.youtube.com/watch?v=VIDEO_ID (stripping &list=RD...).
     For Spotify: keeps clean track URL (stripping tracking query params like ?si=...).
+    For Bilibili: cleans b23.tv shortlinks and strips tracking params while preserving ?p=N.
     """
     if not url:
         return url
     if is_spotify_url(url):
         return url.split("?")[0]
+    from .bilibili import is_bilibili_url, clean_bilibili_url
+    if is_bilibili_url(url):
+        return clean_bilibili_url(url)
     match = YT_VIDEO_REGEX.search(url)
     if match:
         video_id = match.group(5)

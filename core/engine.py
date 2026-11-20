@@ -24,6 +24,7 @@ from .spotify import (
 from .url_parser import (
     extract_urls_from_text, is_playlist_url, fetch_playlist_entries, clean_video_url
 )
+from .scraper import detect_and_resolve_media
 
 
 class DoomEngine:
@@ -68,87 +69,32 @@ class DoomEngine:
             ]
         }
 
-    # ---------------- URL Resolution & Metadata ----------------
+    # ---------------- Universal Media & URL Resolution ----------------
 
     def resolve_url(self, url: str, expand_collection: bool = False) -> Dict[str, Any]:
         """
         Inspects and resolves metadata for any supported URL without downloading.
-        Identifies whether the URL is Spotify, YouTube, direct file, or generic web media.
+        Identifies whether the URL is Spotify, YouTube, generic web video, or direct file.
+        Uses universal web scraper for arbitrary websites.
         """
-        clean = url.strip()
-        result: Dict[str, Any] = {
-            "url": clean,
-            "type": "unknown",
-            "title": "Unknown",
-            "artist": "",
-            "duration": 0,
-            "thumbnail_url": "",
-            "is_collection": False,
-            "entries": [],
-            "suggested_mode": "Audio"
-        }
-
-        # 1. Spotify
-        if is_spotify_url(clean):
-            result["type"] = "spotify"
-            result["suggested_mode"] = "Audio"
-            if is_spotify_playlist_or_album(clean):
-                result["is_collection"] = True
-                if expand_collection:
-                    title, tracks = fetch_spotify_collection(clean)
-                    result["title"] = title
-                    result["entries"] = tracks
-                else:
-                    title, _ = fetch_spotify_collection(clean)
-                    result["title"] = title
-            else:
-                track = fetch_spotify_track(clean)
-                if track:
-                    result["title"] = track.get("title", "")
-                    result["artist"] = track.get("artist", "")
-                    result["duration"] = track.get("duration", 0)
-                    result["thumbnail_url"] = track.get("cover_url", "")
-            return result
-
-        # 2. Check for created playlist / collection
-        if is_playlist_url(clean):
-            result["is_collection"] = True
-            result["type"] = "youtube" if ("youtube.com" in clean or "youtu.be" in clean) else "generic"
-            if expand_collection:
-                try:
-                    title, entries = fetch_playlist_entries(clean, self.ffmpeg_dir)
-                    result["title"] = title
-                    result["entries"] = entries
-                except Exception as e:
-                    result["error"] = str(e)
-            return result
-
-        # 3. Direct File Link (heuristic)
-        path_lower = clean.split("?")[0].lower()
-        file_exts = (
-            ".pdf", ".zip", ".tar", ".gz", ".7z", ".rar", ".iso", ".exe", ".msi",
-            ".docx", ".xlsx", ".pptx", ".txt", ".csv", ".json", ".xml", ".bin"
+        detected = detect_and_resolve_media(
+            url=url,
+            ffmpeg_dir=self.ffmpeg_dir,
+            expand_collections=expand_collection
         )
-        if path_lower.endswith(file_exts):
-            result["type"] = "direct"
-            result["suggested_mode"] = "File"
-            result["title"] = os.path.basename(path_lower)
-            return result
-
-        # 4. YouTube or Generic Web Media
-        try:
-            info = self.downloader.fetch_video_info(clean)
-            result["type"] = "youtube" if ("youtube.com" in clean or "youtu.be" in clean) else "generic"
-            result["title"] = info.get("title", "")
-            result["artist"] = info.get("uploader", "")
-            result["duration"] = info.get("duration", 0)
-            result["thumbnail_url"] = info.get("thumbnail", "")
-            result["suggested_mode"] = "Video"
-        except Exception as e:
-            # Fallback if yt-dlp couldn't extract single video info
-            result["error"] = str(e)
-
-        return result
+        # Ensure backward compatibility with existing keys
+        detected["suggested_mode"] = (
+            "File" if detected["media_type"] == "direct_file"
+            else "Video" if detected["media_type"] == "video"
+            else "Audio"
+        )
+        if detected["media_type"] == "direct_file":
+            detected["type"] = "direct"
+        elif detected["media_type"] == "spotify_audio":
+            detected["type"] = "spotify"
+        else:
+            detected["type"] = detected["media_type"]
+        return detected
 
     # ---------------- Synchronous Download ----------------
 
@@ -165,7 +111,7 @@ class DoomEngine:
         crop_square: bool = True
     ) -> str:
         """
-        Synchronously downloads a media link or direct file.
+        Synchronously downloads a media link, web video, or direct file.
         Automatically handles audio conversion, video merging, artwork embedding, or file streaming.
         Returns the absolute path of the downloaded file.
         """
@@ -183,7 +129,92 @@ class DoomEngine:
             )
             return filepath
 
-        # Mode B: Spotify Track -> Match YouTube Audio -> Download & Tag
+        # Pre-download duplicate detection for audio & video
+        fmt_info = get_format_info(format_label)
+        target_ext = fmt_info.get("ext", "")
+        if skip_existing and target_ext:
+            from .downloader import find_existing_media
+            existing_candidate = None
+            try:
+                if is_spotify_url(url):
+                    s_info = fetch_spotify_track(url)
+                    if s_info:
+                        stitle = s_info.get("title", "")
+                        sartist = s_info.get("artist", "")
+                        existing_candidate = find_existing_media(
+                            download_dir=target_dir,
+                            title=stitle,
+                            format_label=format_label,
+                            url=url,
+                            ffmpeg_dir=self.ffmpeg_dir
+                        )
+                        if not existing_candidate and sartist:
+                            existing_candidate = find_existing_media(
+                                download_dir=target_dir,
+                                title=f"{sartist} - {stitle}",
+                                format_label=format_label,
+                                url=url,
+                                ffmpeg_dir=self.ffmpeg_dir
+                            )
+                elif fmt_info.get("kind") == "video":
+                    v_info = self.downloader.fetch_video_info(url)
+                    v_title = v_info.get("title", "")
+                    v_id = v_info.get("id", "")
+                    existing_candidate = find_existing_media(
+                        download_dir=target_dir,
+                        title=v_title,
+                        format_label=format_label,
+                        source_id=v_id,
+                        url=url,
+                        ffmpeg_dir=self.ffmpeg_dir
+                    )
+                else:
+                    a_info = self.downloader.fetch_video_info(url)
+                    a_title = a_info.get("title", "")
+                    a_uploader = a_info.get("uploader", "")
+                    existing_candidate = find_existing_media(
+                        download_dir=target_dir,
+                        title=a_title,
+                        format_label=format_label,
+                        url=url,
+                        ffmpeg_dir=self.ffmpeg_dir
+                    )
+                    if not existing_candidate and a_uploader:
+                        existing_candidate = find_existing_media(
+                            download_dir=target_dir,
+                            title=f"{a_uploader} - {a_title}",
+                            format_label=format_label,
+                            url=url,
+                            ffmpeg_dir=self.ffmpeg_dir
+                        )
+            except Exception:
+                existing_candidate = None
+
+            if existing_candidate and os.path.isfile(existing_candidate):
+                if progress_callback:
+                    progress_callback({
+                        "status": "exists",
+                        "percent": 100.0,
+                        "message": f"Media already downloaded at {existing_candidate} • Skipped re-download",
+                        "filepath": existing_candidate
+                    })
+                return os.path.abspath(existing_candidate)
+
+        # Mode B: Audio conversion requested for a video (e.g. "[Audio] MP3 (320 kbps)")
+        if format_label.startswith("[Audio] "):
+            actual_audio_fmt = format_label.replace("[Audio] ", "", 1)
+            return self.downloader.download_audio(
+                url=url,
+                download_dir=target_dir,
+                format_label=actual_audio_fmt,
+                embed_thumbnail=embed_thumbnail,
+                add_metadata=add_metadata,
+                crop_square=crop_square,
+                progress_callback=progress_callback,
+                cancel_event=cancel_event
+            )
+
+        # Mode C: Spotify Track -> Match YouTube Audio -> Download & Tag
         if is_spotify_url(url):
             spotify_info = fetch_spotify_track(url)
             artist = spotify_info.get("artist", "") if spotify_info else ""
@@ -211,29 +242,64 @@ class DoomEngine:
                 custom_thumbnail_url=cover_url
             )
 
-        # Mode C: Video format
+        download_url = url
+        from .bilibili import is_bilibili_url, clean_bilibili_url
+        if is_bilibili_url(download_url):
+            download_url = clean_bilibili_url(download_url)
+
+        # Mode D: Video format
         fmt_info = get_format_info(format_label)
         if fmt_info.get("kind") == "video":
-            return self.downloader.download_video(
-                url=url,
+            try:
+                return self.downloader.download_video(
+                    url=download_url,
+                    download_dir=target_dir,
+                    format_label=format_label,
+                    add_metadata=add_metadata,
+                    progress_callback=progress_callback,
+                    cancel_event=cancel_event
+                )
+            except Exception as initial_err:
+                resolved = self.resolve_url(url)
+                if resolved.get("stream_url") and resolved["stream_url"] != url:
+                    return self.downloader.download_video(
+                        url=resolved["stream_url"],
+                        download_dir=target_dir,
+                        format_label=format_label,
+                        add_metadata=add_metadata,
+                        progress_callback=progress_callback,
+                        cancel_event=cancel_event,
+                        http_headers=resolved.get("http_headers", {})
+                    )
+                raise initial_err
+
+        # Mode E: Audio format
+        try:
+            return self.downloader.download_audio(
+                url=download_url,
                 download_dir=target_dir,
                 format_label=format_label,
+                embed_thumbnail=embed_thumbnail,
                 add_metadata=add_metadata,
+                crop_square=crop_square,
                 progress_callback=progress_callback,
                 cancel_event=cancel_event
             )
-
-        # Mode D: Audio format
-        return self.downloader.download_audio(
-            url=url,
-            download_dir=target_dir,
-            format_label=format_label,
-            embed_thumbnail=embed_thumbnail,
-            add_metadata=add_metadata,
-            crop_square=crop_square,
-            progress_callback=progress_callback,
-            cancel_event=cancel_event
-        )
+        except Exception as initial_err:
+            resolved = self.resolve_url(url)
+            if resolved.get("stream_url") and resolved["stream_url"] != url:
+                return self.downloader.download_audio(
+                    url=resolved["stream_url"],
+                    download_dir=target_dir,
+                    format_label=format_label,
+                    embed_thumbnail=embed_thumbnail,
+                    add_metadata=add_metadata,
+                    crop_square=crop_square,
+                    progress_callback=progress_callback,
+                    cancel_event=cancel_event,
+                    http_headers=resolved.get("http_headers", {})
+                )
+            raise initial_err
 
     # ---------------- Asynchronous Queue Dispatch ----------------
 
@@ -243,7 +309,7 @@ class DoomEngine:
         format_label: str = DEFAULT_FORMAT,
         download_dir: Optional[str] = None,
         title: str = "Resolving track...",
-        artist: str = "YouTube",
+        artist: str = "Web",
         duration: int = 0,
         thumbnail_url: str = "",
         embed_thumbnail: bool = True,
@@ -272,7 +338,7 @@ class DoomEngine:
     def enqueue_batch(
         self,
         text_or_urls: Any,
-        format_label: str = DEFAULT_FORMAT,
+        format_label: Optional[str] = None,
         download_dir: Optional[str] = None,
         expand_collections: bool = True,
         skip_existing: bool = True,
@@ -280,8 +346,8 @@ class DoomEngine:
         add_metadata: bool = True
     ) -> List[DownloadItem]:
         """
-        Parses text or list of URLs, expands any collections if enabled, and enqueues all items.
-        Returns list of enqueued DownloadItem instances.
+        Parses text or list of URLs, auto-detects media types, expands collections,
+        and enqueues items with smart defaults or specified format.
         """
         if isinstance(text_or_urls, str):
             urls = extract_urls_from_text(text_or_urls)
@@ -296,14 +362,15 @@ class DoomEngine:
         enqueued_items: List[DownloadItem] = []
 
         for url in urls:
-            # Expand collections/playlists if requested
+            # 1. Expand collections/playlists if requested
             if expand_collections and is_playlist_url(url):
                 try:
                     title, entries = fetch_playlist_entries(url, self.ffmpeg_dir)
                     for entry in entries:
+                        chosen_fmt = format_label or "MP4 · Best available"
                         item = self.queue_manager.add_item(
                             url=entry["url"],
-                            format_label=format_label,
+                            format_label=chosen_fmt,
                             download_dir=target_dir,
                             title=entry["title"],
                             artist=entry["uploader"],
@@ -319,14 +386,28 @@ class DoomEngine:
                 except Exception:
                     pass
 
-            # Single item
+            # 2. Single item: Detect smart default if format_label not provided
             clean = clean_video_url(url)
             is_spot = is_spotify_url(clean)
+            if not format_label:
+                detected = self.resolve_url(clean)
+                chosen_fmt = detected.get("default_format", DEFAULT_FORMAT)
+                artist = detected.get("artist") or detected.get("platform", "Web")
+                title = detected.get("title") or "Resolving track..."
+                thumb = detected.get("thumbnail_url", "")
+            else:
+                chosen_fmt = format_label
+                artist = "Spotify" if is_spot else "Web"
+                title = "Resolving track..."
+                thumb = ""
+
             item = self.queue_manager.add_item(
                 url=clean,
-                format_label=format_label,
+                format_label=chosen_fmt,
                 download_dir=target_dir,
-                artist="Spotify" if is_spot else "YouTube",
+                title=title,
+                artist=artist,
+                thumbnail_url=thumb,
                 embed_thumbnail=embed_thumbnail,
                 add_metadata=add_metadata,
                 skip_existing=skip_existing
@@ -343,7 +424,7 @@ class DoomEngine:
             return list(self.queue_manager.items)
 
     def get_stats(self) -> Dict[str, Any]:
-        """Returns aggregate queue statistics (total, queued, active, completed, failed, speed)."""
+        """Returns aggregate queue statistics."""
         with self.queue_manager.lock:
             total = len(self.queue_manager.items)
             queued = sum(1 for i in self.queue_manager.items if i.status == QueueItemStatus.QUEUED)
@@ -367,29 +448,28 @@ class DoomEngine:
             }
 
     def pause(self):
-        """Pauses the queue dispatch."""
         self.queue_manager.pause()
 
     def resume(self):
-        """Resumes the queue dispatch."""
         self.queue_manager.resume()
 
+    def pause_item(self, item_id: str):
+        self.queue_manager.pause_item(item_id)
+
+    def resume_item(self, item_id: str):
+        self.queue_manager.resume_item(item_id)
+
     def cancel(self, item_id: str):
-        """Cancels a queued or active download."""
         self.queue_manager.cancel_item(item_id)
 
     def retry(self, item_id: str):
-        """Retries a failed or cancelled item."""
         self.queue_manager.retry_item(item_id)
 
     def remove(self, item_id: str) -> bool:
-        """Removes an item from the queue."""
         return self.queue_manager.remove_item(item_id)
 
     def clear_completed(self) -> List[str]:
-        """Removes finished, existing, and cancelled items from the queue."""
         return self.queue_manager.clear_completed()
 
     def stop(self):
-        """Gracefully shuts down background queue workers."""
         self.queue_manager.stop()
