@@ -291,4 +291,20 @@ Validation:
 - Added `test_steam_multi_trailer_collection` in `tests/test_scraper_advanced.py`.
 - Desktop frontend production build passed: `npm.cmd --prefix desktop run build` (`tsc && vite build`) succeeded in 2.20s with 0 errors.
 Next: None.
-References: local working tree changes; no commit or release published.
+References: commit `1c5fec8`.
+
+
+## 2026-11-20 — antigravity-git-push-09
+Agent: Antigravity (DeepMind)
+Status: completed
+Task: commit organized project structure, advanced engine scraping, Electron desktop app, selective multi-trailer preview, Explorer reveal fix, and disk deletion to Git, and push directly to GitHub remote repository.
+Changes:
+- Configured local git `core.sshCommand` to use Windows System32 OpenSSH (`C:/Windows/System32/OpenSSH/ssh.exe`) to resolve host key mismatch.
+- Committed all 56 staged files across `core/`, `desktop/`, `docs/`, `tests/`, `Launch.bat`, and root documentation (commit `1c5fec8`).
+- Successfully pushed branch `main` to `origin/main` (`git@github.com:arunmauryaz/doom-downloader.git`).
+Boundary impact: remote repository synchronized with all local improvements. No breaking code changes.
+Validation:
+- Remote push verified: `To github.com:arunmauryaz/doom-downloader.git eebf881..1c5fec8 main -> main`.
+- Working tree status checked: `On branch main. Your branch is up to date with 'origin/main'. nothing to commit, working tree clean`.
+Next: None.
+References: commit `1c5fec8` and ledger sync commit pushed to `origin/main`.
